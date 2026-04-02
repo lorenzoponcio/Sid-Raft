@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Painel Raft – {{ node_id }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>⚙️ Cluster Raft</h1>
+        <p>Conectado via <strong>{{ node_id }}</strong></p>
+      </div>
+      <div id="clock" class="clock"></div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Ações do nó local -->
+    <section class="toolbar">
+      <button class="btn-danger" onclick="toggleNode()">⚡ Simular falha / reativar este nó</button>
+      <button class="btn-secondary" onclick="resetNode()">🔄 Reiniciar este nó</button>
+      <button class="btn-primary" onclick="loadCluster()">↺ Atualizar agora</button>
+    </section>
+
+    <!-- Configuração de timeouts -->
+    <section class="config-panel">
+      <h2>⏱ Ajustar Timeouts (nó local)</h2>
+      <div class="config-grid">
+        <label>
+          Election Min (s)
+          <input id="cfg-emin" type="number" step="0.5" min="1" value="3">
+        </label>
+        <label>
+          Election Max (s)
+          <input id="cfg-emax" type="number" step="0.5" min="1" value="6">
+        </label>
+        <label>
+          Heartbeat Interval (s)
+          <input id="cfg-hb" type="number" step="0.5" min="0.5" value="1.5">
+        </label>
+        <button class="btn-primary" onclick="applyConfig()">Aplicar</button>
+      </div>
+      <p id="cfg-status" class="cfg-status"></p>
+    </section>
+
+    <!-- Cluster -->
+    <section>
+      <h2>🖧 Visão do Cluster</h2>
+      <div id="cluster" class="grid"></div>
+    </section>
+
+    <!-- Legenda -->
+    <section>
+      <h2>Legenda</h2>
+      <div class="legend">
+        <span class="badge leader">Leader</span>
+        <span class="badge follower">Follower</span>
+        <span class="badge candidate">Candidate</span>
+        <span class="badge offline">Offline / Unreachable</span>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    // Relógio
+    function updateClock() {
+      document.getElementById('clock').textContent = new Date().toLocaleTimeString('pt-BR');
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // Carrega o cluster e renderiza os cards
+    async function loadCluster() {
+      try {
+        const res = await fetch('/cluster');
+        if (!res.ok) throw new Error('Falha na requisição');
+        const data = await res.json();
+        const container = document.getElementById('cluster');
+        container.innerHTML = '';
+
+        // Ordena: Leader primeiro
+        const sorted = [...data.nodes].sort((a, b) => {
+          const order = { Leader: 0, Follower: 1, Candidate: 2, Offline: 3, Unreachable: 4 };
+          return (order[a.role] ?? 5) - (order[b.role] ?? 5);
+        });
+
+        sorted.forEach(node => {
+          const roleClass = (node.role || 'offline').toLowerCase();
+          const history = (node.history || [])
+            .slice().reverse()
+            .map(item => `<li>${escHtml(item)}</li>`)
+            .join('');
+
+          const configInfo = node.election_min != null
+            ? `<p><small>⏱ Election: ${node.election_min}–${node.election_max}s | HB: ${node.heartbeat_interval}s</small></p>`
+            : '';
+
+          const card = document.createElement('article');
+          card.className = `card ${roleClass}`;
+          card.innerHTML = `
+            <div class="card-header">
+              <h3>${escHtml(node.id)}</h3>
+              <span class="badge ${roleClass}">${escHtml(node.role || 'Sem resposta')}</span>
+            </div>
+            <div class="card-body">
+              <p><strong>Termo:</strong> ${node.term ?? '-'}</p>
+              <p><strong>Líder visto:</strong> ${escHtml(node.leader_id ?? '-')}</p>
+              <p><strong>Ativo:</strong> ${node.alive === false ? '<span class="offline-label">Não</span>' : '<span class="online-label">Sim</span>'}</p>
+              ${configInfo}
+            </div>
+            <details>
+              <summary>📋 Histórico (${(node.history || []).length} eventos)</summary>
+              <ul class="history-list">${history || '<li>Sem eventos</li>'}</ul>
+            </details>
+          `;
+          container.appendChild(card);
+        });
+      } catch (e) {
+        console.error('Erro ao carregar cluster:', e);
+      }
+    }
+
+    function escHtml(str) {
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    async function toggleNode() {
+      await fetch('/toggle', { method: 'POST' });
+      await loadCluster();
+    }
+
+    async function resetNode() {
+      await fetch('/reset', { method: 'POST' });
+      await loadCluster();
+    }
+
+    async function applyConfig() {
+      const emin = parseFloat(document.getElementById('cfg-emin').value);
+      const emax = parseFloat(document.getElementById('cfg-emax').value);
+      const hb   = parseFloat(document.getElementById('cfg-hb').value);
+      const status = document.getElementById('cfg-status');
+
+      if (emin >= emax) {
+        status.textContent = '⚠️ Election Min deve ser menor que Election Max.';
+        status.style.color = '#b91c1c';
+        return;
+      }
+
+      try {
+        const res = await fetch('/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ election_min: emin, election_max: emax, heartbeat_interval: hb })
+        });
+        const data = await res.json();
+        status.textContent =
+          `✅ Aplicado: election=[${data.election_min}, ${data.election_max}]s, heartbeat=${data.heartbeat_interval}s`;
+        status.style.color = '#1f8b4c';
+      } catch (e) {
+        status.textContent = '❌ Erro ao aplicar configuração.';
+        status.style.color = '#b91c1c';
+      }
+      await loadCluster();
+    }
+
+    // Carrega config atual do nó ao iniciar
+    async function loadCurrentConfig() {
+      try {
+        const res = await fetch('/status');
+        const data = await res.json();
+        if (data.election_min != null) {
+          document.getElementById('cfg-emin').value = data.election_min;
+          document.getElementById('cfg-emax').value = data.election_max;
+          document.getElementById('cfg-hb').value   = data.heartbeat_interval;
+        }
+      } catch {}
+    }
+
+    loadCurrentConfig();
+    loadCluster();
+    setInterval(loadCluster, 2000);
+  </script>
+</body>
+</html>
